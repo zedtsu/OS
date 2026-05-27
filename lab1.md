@@ -1,265 +1,265 @@
-# Лабораторная работа №1
-## Исследование процесса компиляции и оптимизации программ на C++
+## 1. Описание задачи
+В рамках лабораторной работы реализована программа для численного интегрирования функции $f(x) = x^2$ на заданном отрезке $[a, b]$ методом трапеций. 
 
-**Студент:** Шугалей Александр  
-**Группа:** 2271
+Работа разделена на следующие этапы:
+1. Создание базовой последовательной версии на языке C.
+2. Генерация ассемблерного кода с различными уровнями оптимизации (`-O0`, `-O2`) и его подробный анализ.
+3. Разделение программы на логические модули и автоматизация сборки с помощью `Makefile`.
+4. Модернизация программы: распараллеливание вычислений на два независимых процесса (`fork()`) с синхронизацией через разделяемую память POSIX (`mmap`) и семафоры (`sem_t`).
 
 ---
 
-## 1. Реализация программы на C++
+## 2. Ассемблерный анализ и оптимизация
 
-### 1.1 Заголовочный файл `factorial.h`
+Для генерации ассемблерного кода использовались команды:
+```bash
+gcc -S -O0 main.c -o main_O0.s
+gcc -S -O2 main.c -o main_O2.s
+```
 
-```cpp
-#ifndef FACTORIAL_H
-#define FACTORIAL_H
+### Подробный разбор ассемблерного кода функций (вариант `-O0`)
 
-unsigned long long factorial(int n);
+Ниже представлен участок сгенерированного компилятором GCC кода x86-64 с подробными комментариями архитектуры цикла и работы с памятью:
+
+```assembly
+.file	"main.c"
+	.text
+	.globl	f
+	.type	f, @function
+f:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	movsd	%xmm0, -8(%rbp)     # Входной аргумент x (из xmm0) сохраняем в стек
+	movsd	-8(%rbp), %xmm0     # Загружаем x обратно в xmm0
+	mulsd	-8(%rbp), %xmm0     # xmm0 = x * x (вычисление x^2)
+	popq	%rbp
+	ret                         # Возврат значения через регистр xmm0
+
+	.globl	integrate
+	.type	integrate, @function
+integrate:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	subq	\$48, %rsp           # Выделяем 48 байт в стеке под локальные переменные
+	movsd	%xmm0, -32(%rbp)    # Сохраняем в стек переменную 'a'
+	movsd	%xmm1, -40(%rbp)    # Сохраняем в стек переменную 'b'
+	movl	%edi, -44(%rbp)     # Сохраняем в стек переменную 'n' (int)
+	
+	# Вычисление h = (b - a) / n
+	movsd	-40(%rbp), %xmm0
+	subsd	-32(%rbp), %xmm0    # xmm0 = b - a
+	cvtsi2sdl	-44(%rbp), %xmm1 # Конвертируем 'n' из int в double
+	divsd	%xmm1, %xmm0        # xmm0 = (b - a) / n
+	movsd	%xmm0, -8(%rbp)     # Сохраняем шаг 'h' в стеке
+
+	# Вычисление стартовой суммы: sum = 0.5 * (f(a) + f(b))
+	movq	-32(%rbp), %rax
+	movq	%rax, %xmm0         # Передаем 'a' в f()
+	call	f
+	movsd	%xmm0, -56(%rbp)    # Временное сохранение f(a) в стек
+	movq	-40(%rbp), %rax
+	movq	%rax, %xmm0         # Передаем 'b' в f()
+	call	f                   # Вызов f(b)
+	addsd	-56(%rbp), %xmm0    # xmm0 = f(a) + f(b)
+	movsd	.LC0(%rip), %xmm1   # Загружаем константу 0.5 из секции данных
+	mulsd	%xmm1, %xmm0        # xmm0 = 0.5 * (f(a) + f(b))
+	movsd	%xmm0, -16(%rbp)    # Сохраняем результат в переменную 'sum' в стеке
+
+	# Инициализация цикла: i = 1
+	movl	\$1, -20(%rbp)       # Локальная переменная 'i' = 1 в стеке
+	jmp	.L4                 # Безусловный переход к проверке условия цикла
+
+.L5:    # ТЕЛО ЦИКЛА
+	movl	-20(%rbp), %eax     # Загружаем 'i' из стека в регистр общего назначения
+	cvtsi2sdl	%eax, %xmm0     # Переводим счетчик 'i' во float-формат (double)
+	mulsd	-8(%rbp), %xmm0     # xmm0 = i * h
+	movsd	-32(%rbp), %xmm1    # Загружаем 'a' из стека
+	addsd	%xmm1, %xmm0        # xmm0 = a + i * h
+	call	f                   # Вызов f(a + i * h). Результат возвращается в xmm0
+	movsd	-16(%rbp), %xmm1    # Загружаем текущее значение 'sum' из стека
+	addsd	%xmm1, %xmm0        # sum += f(...)
+	movsd	%xmm0, -16(%rbp)    # Записываем обновленную 'sum' обратно в стек
+	addl	\$1, -20(%rbp)       # Инкремент счетчика: i++
+
+.L4:    # УСЛОВИЕ ЦИКЛА
+	movl	-20(%rbp), %eax     # Загружаем 'i'
+	cmpl	-44(%rbp), %eax     # Сравниваем i и n (инструкция сравнения)
+	jl	.L5                 # Если i < n (Jump if Less), прыгаем в тело цикла на .L5
+
+	# Финал: return sum * h
+	movsd	-16(%rbp), %xmm0    # Загружаем 'sum'
+	mulsd	-8(%rbp), %xmm0     # xmm0 = sum * h
+	leave                       # Восстановление указателей стека и кадра rbp
+	ret                         # Выход из функции
+```
+
+### Анализ флагов оптимизации GCC
+1. **Режим `-O0` (Без оптимизации):** Программа работает напрямую со стеком ОЗУ. Любое изменение переменной (например, `i++` или накопление `sum`) вызывает принудительную запись в память и чтение из неё. Это сильно замедляет выполнение, но делает код линейным и понятным для отладки.
+2. **Режим `-O2` (Высокая оптимизация):** Компилятор полностью убирает работу со стеком внутри критических участков. Все переменные цикла (`i`, `sum`, `h`) постоянно удерживаются в сверхбыстрых регистрах процессора (`%xmm` и `%eax`). Более того, вызовы функции `f(x)` инлайнятся (встраиваются непосредственно в цикл), устраняя накладные расходы на команды `call` и `ret`.
+
+---
+
+## 3. Модульная структура проекта
+
+Проект разделен на три логических файла: интерфейс вычислений, реализация математики и управляющий модуль ядра ОС.
+
+### Файл `math_functions.h`
+```c
+#ifndef MATH_FUNCTIONS_H
+#define MATH_FUNCTIONS_H
+
+double f(double x);
+double integrate_part(double a, double b, int n);
 
 #endif
-Описание:
-В заголовочном файле содержится объявление функции вычисления факториала.
-Конструкция #ifndef / #define / #endif используется для защиты от повторного подключения файла.
+```
 
-1.2 Реализация функции factorial.cpp
-cpp
-#include "factorial.h"
+### Файл `math_functions.c`
+```c
+#include "math_functions.h"
 
-unsigned long long factorial(int n) {
-    if (n < 0)
-        return 0;
-    
-    unsigned long long result = 1;
-    
-    for (int i = 1; i <= n; i++) {
-        result *= i;
-    }
-    
-    return result;
+double f(double x) {
+    return x * x;
 }
-Описание:
-Функция реализует итеративное вычисление факториала.
-В отличие от рекурсивного подхода, цикл использует меньше памяти и работает быстрее для небольших значений n.
-Проверка if (n < 0) не допускает вычисление факториала отрицательных чисел.
-Основное вычисление происходит в цикле: result *= i, что эквивалентно result = result * i.
 
-1.3 Главная программа main.cpp
-cpp
-#include <iostream>
-#include <fstream>
-#include <thread>
-#include "factorial.h"
-
-using namespace std;
-
-void computeFactorial(int n) {
-    unsigned long long result = factorial(n);
-    
-    ofstream file("result.txt");
-    if (file.is_open()) {
-        file << result;
-        file.close();
+double integrate_part(double a, double b, int n) {
+    double h = (b - a) / n;
+    double sum = 0.5 * (f(a) + f(b));
+    for (int i = 1; i < n; i++) {
+        sum += f(a + i * h);
     }
+    return sum * h;
 }
+```
+
+---
+
+## 4. Параллельное программирование и IPC в Linux
+
+Для параллельного выполнения расчетов отрезок интегрирования разбивается пополам. Системный вызов `fork()` ветвит текущий процесс на родительский и дочерний.
+
+Для организации межпроцессного взаимодействия (IPC) используется **Shared Memory** посредством `mmap` с флагами `MAP_SHARED | MAP_ANONYMOUS`. Синхронизация доступа к переменной в памяти реализована через **именованные семафоры POSIX** (`sem_t`), что гарантирует атомарность операции сложения и защищает от состояния гонки (Race Condition).
+
+### Файл `main.c`
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include "math_functions.h"
+
+#define SEM_NAME "/integral_sem"
 
 int main() {
-    int n = 10;
-    
-    cout << "Calculating factorial of " << n << "..." << endl;
-    
-    thread calculator(computeFactorial, n);
-    
-    cout << "Parallel thread started..." << endl;
-    cout << "Main thread continues working..." << endl;
-    
-    calculator.join();
-    
-    cout << "Thread finished." << endl;
-    
-    unsigned long long result;
-    ifstream file("result.txt");
-    if (file.is_open()) {
-        file >> result;
-        file.close();
+    double a = 0.0, b = 10.0;
+    int n = 1000000;
+    double mid = a + (b - a) / 2.0;
+
+    // 1. Создание разделяемой памяти (Shared Memory)
+    double *shared_result = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, 
+                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared_result == MAP_FAILED) {
+        perror("mmap failed");
+        return 1;
     }
-    
-    cout << n << "! = " << result << endl;
-    
+    *shared_result = 0.0; 
+
+    // 2. Инициализация семафора синхронизации
+    sem_t *sem = sem_open(SEM_NAME, O_CREAT, 0644, 1);
+    if (sem == SEM_FAILED) {
+        perror("sem_open failed");
+        return 1;
+    }
+
+    printf("[Main] Starting parallel computation...\n");
+
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        perror("fork failed");
+        return 1;
+    }
+
+    if (pid == 0) {
+        // --- ДОЧЕРНИЙ ПРОЦЕСС ---
+        printf("[Child] Computing interval [%.1f, %.1f]\n", a, mid);
+        double local_res = integrate_part(a, mid, n / 2);
+
+        // Критическая секция
+        sem_wait(sem);
+        *shared_result += local_res;
+        sem_post(sem);
+
+        printf("[Child] Job done.\n");
+        exit(0);
+    } else {
+        // --- РОДИТЕЛЬСКИЙ ПРОЦЕСС ---
+        printf("[Parent] Computing interval [%.1f, %.1f]\n", mid, b);
+        double local_res = integrate_part(mid, b, n / 2);
+
+        // Критическая секция
+        sem_wait(sem);
+        *shared_result += local_res;
+        sem_post(sem);
+
+        // Синхронизация: ожидание завершения дочернего процесса
+        wait(NULL);
+
+        // Вывод итогового значения
+        printf("[Parent] Final Integrated Result: %f\n", *shared_result);
+
+        // Освобождение системных ресурсов IPC
+        sem_close(sem);
+        sem_unlink(SEM_NAME);
+        munmap(shared_result, sizeof(double));
+    }
+
     return 0;
 }
-2. Компиляция программы
-Команда компиляции:
-bash
-g++ main.cpp factorial.cpp -o main.exe
-Запуск программы:
-bash
-main.exe
-Пример выполнения:
-text
-Calculating factorial of 10...
-Parallel thread started...
-Main thread continues working...
-Thread finished.
-10! = 3628800
-3. Получение ассемблерного листинга
-Без оптимизации (-O0):
-bash
-g++ factorial.cpp -O0 -S -o factorial_O0.asm
-С оптимизацией (-O3):
-bash
-g++ factorial.cpp -O3 -S -o factorial_O3.asm
-4. Анализ ассемблерного кода (без оптимизации, -O0)
-Ниже приведён фрагмент ассемблерного кода функции вычисления факториала с комментариями.
+```
 
-asm
-.file   "factorial.cpp"
-.text
-.globl  _Z9factoriali              // объявление глобальной функции
-.def    _Z9factoriali; .scl 2; .type 32; .endef
-.seh_proc   _Z9factoriali
+---
 
-_Z9factoriali:
-.LFB0:
-    // ===== ПРОЛОГ ФУНКЦИИ =====
-    pushq  %rbp                    // сохраняем старый базовый указатель
-    movq   %rsp, %rbp              // создаем новый стековый фрейм
-    subq   $16, %rsp               // выделяем память под локальные переменные
-    
-    // сохраняем аргумент функции n
-    movl   %ecx, 16(%rbp)          // n -> стек
-    
-    // ===== ПРОВЕРКА: if (n < 0) return 0 =====
-    cmpl   $0, 16(%rbp)            // сравниваем n и 0
-    jns    .L2                     // если n >= 0 → продолжаем
-    movl   $0, %eax                // eax = 0 (результат)
-    jmp    .L3                     // переход к выходу
+## 5. Автоматизация сборки (Makefile)
 
-.L2:
-    // ===== ИНИЦИАЛИЗАЦИЯ =====
-    movq   $1, -8(%rbp)            // result = 1
-    movl   $1, -12(%rbp)           // i = 1
-    jmp    .L4                     // переход к проверке условия цикла
+Сборка проекта автоматизирована с помощью утилиты `make`. Флаги компиляции включают строгий контроль предупреждений (`-Wall -Wextra`) и оптимизацию `-O2`.
 
-.L5:
-    // ===== ТЕЛО ЦИКЛА =====
-    movl   -12(%rbp), %eax         // eax = i
-    cltq                            // преобразование int -> long long
-    movq   -8(%rbp), %rdx          // rdx = result
-    imulq  %rdx, %rax              // rax = result * i
-    movq   %rax, -8(%rbp)          // result = result * i
-    addl   $1, -12(%rbp)           // i++
+```makefile
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
+TARGET = integral_prog
 
-.L4:
-    // ===== ПРОВЕРКА УСЛОВИЯ ЦИКЛА =====
-    movl   -12(%rbp), %eax         // eax = i
-    cmpl   16(%rbp), %eax          // сравниваем i и n
-    jle    .L5                     // если i <= n → повторяем цикл
+all: \$(TARGET)
 
-    // ===== ВОЗВРАТ РЕЗУЛЬТАТА =====
-    movq   -8(%rbp), %rax          // загружаем result в регистр возврата
+\$(TARGET): main.o math_functions.o
+	\$(CC) \((CFLAGS) -o\)(TARGET) main.o math_functions.o
 
-.L3:
-    // ===== ЭПИЛОГ ФУНКЦИИ =====
-    addq   $16, %rsp               // освобождаем стек
-    popq   %rbp                    // восстанавливаем rbp
-    ret                            // выход из функции
-Соответствие переменных:
-Переменная C++	Адрес в ASM
-n	16(%rbp)
-result	-8(%rbp)
-i	-12(%rbp)
-Анализ цикла:
-Цикл реализован с помощью меток и переходов:
+main.o: main.c math_functions.h
+	\((CC)\)(CFLAGS) -c main.c
 
-Метка	Назначение
-.L4	проверка условия
-.L5	тело цикла
-jle	переход при i <= n
-5. Особенности оптимизированного кода (-O3)
-При использовании флага -O3 компилятор GCC выполняет максимальную оптимизацию программы.
-
-В оптимизированной версии:
-
-уменьшается количество инструкций;
-
-сокращается число обращений к памяти;
-
-локальные переменные чаще хранятся в регистрах процессора;
-
-цикл вычисления факториала выполняется эффективнее.
-
-По сравнению с вариантом -O0 оптимизированный код:
-
-содержит меньше инструкций;
-
-реже использует стек;
-
-активнее применяет регистры процессора;
-
-выполняется быстрее.
-
-Однако такой ASM-код становится менее наглядным для изучения.
-
-6. Создание Makefile
-Файл Makefile
-makefile
-CXX = g++
-CXXFLAGS = -Wall -std=c++11
-
-all: main.exe
-
-main.exe: main.o factorial.o
-	$(CXX) main.o factorial.o -o main.exe
-
-main.o: main.cpp factorial.h
-	$(CXX) $(CXXFLAGS) -c main.cpp
-
-factorial.o: factorial.cpp factorial.h
-	$(CXX) $(CXXFLAGS) -c factorial.cpp
-
-asm:
-	$(CXX) factorial.cpp -O0 -S -o factorial_O0.asm
-	$(CXX) factorial.cpp -O3 -S -o factorial_O3.asm
+math_functions.o: math_functions.c math_functions.h
+	\((CC)\)(CFLAGS) -c math_functions.c
 
 clean:
-	del *.o main.exe *.asm result.txt
+	rm -f *.o \$(TARGET)
+```
 
-run: main.exe
-	main.exe
+---
 
-.PHONY: all asm clean run
-Использование Makefile:
-Команда	Описание
-mingw32-make	Сборка проекта
-mingw32-make asm	Генерация ASM листингов
-mingw32-make run	Запуск программы
-mingw32-make clean	Очистка проекта
-7. Реализация параллельного выполнения
-Для демонстрации многопоточности в программе используется отдельный поток выполнения с использованием библиотеки:
+## 6. Фиксация версий в Git
 
-cpp
-#include <thread>
-Создание потока:
+Управление версиями проекта осуществлялось локально при помощи Git:
 
-cpp
-thread calculator(computeFactorial, n);
-Синхронизация потоков:
+```bash
+git init
+git add main.c math_functions.c math_functions.h Makefile
+git commit -m "Initial commit: Modular architecture with process-level parallelism"
+```
 
-cpp
-calculator.join();
-Метод join() заставляет главный поток ожидать завершения вычислений.
+---
 
-8. Выводы
-В ходе выполнения лабораторной работы были получены следующие результаты:
-
-Разработана программа для вычисления факториала с использованием многопоточности.
-
-Изучены этапы компиляции программы на C++.
-
-Получены и проанализированы ассемблерные листинги с различными уровнями оптимизации (-O0 и -O3).
-
-Выявлены различия между неоптимизированным и оптимизированным кодом.
-
-Создан Makefile для автоматизации сборки проекта и генерации ассемблерного кода.
-
-Изучена работа с потоками на примере параллельного вычисления факториала.
+## Вывод
+В ходе выполнения лабораторной работы были изучены низкоуровневые принципы работы транслятора GCC. Анализ ассемблерного кода наглядно показал разницу между неоптимизированным кодом и кодом с флагом `-O2`, где операции со стеком ОЗУ заменяются регистрами процессора. Успешно освоены механизмы параллельного программирования Linux (`fork`), работа с разделяемой памятью и примитивами синхронизации для предотвращения race condition.

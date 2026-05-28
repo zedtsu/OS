@@ -128,5 +128,5 @@ reboot
 ---
 
 ## 7. Запись отчёта: 
-# https://vk.com/away.php?to=https%3A%2F%2Fdisk.yandex.ru%2Fi%2FOv_IlraIYt4SoQ&utf=1
+# https://disk.yandex.ru/i/Ov_IlraIYt4SoQ
 
